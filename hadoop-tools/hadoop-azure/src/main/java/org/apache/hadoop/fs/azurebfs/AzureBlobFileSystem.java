@@ -26,6 +26,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.Hashtable;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -56,6 +57,7 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathIOException;
+import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.fs.azurebfs.constants.AbfsHttpConstants;
 import org.apache.hadoop.fs.azurebfs.constants.FileSystemConfigurations;
 import org.apache.hadoop.fs.azurebfs.constants.FileSystemUriSchemes;
@@ -107,6 +109,8 @@ public class AzureBlobFileSystem extends FileSystem {
 
     this.uri = URI.create(uri.getScheme() + "://" + uri.getAuthority());
     this.abfsStore = new AzureBlobFileSystemStore(uri, this.isSecureScheme(), configuration);
+    LOG.trace("AzureBlobFileSystemStore init complete");
+
     final AbfsConfiguration abfsConfiguration = abfsStore.getAbfsConfiguration();
 
     this.setWorkingDirectory(this.getHomeDirectory());
@@ -121,6 +125,7 @@ public class AzureBlobFileSystem extends FileSystem {
       }
     }
 
+    LOG.trace("Initiate check for delegation token manager");
     if (UserGroupInformation.isSecurityEnabled()) {
       this.delegationTokenEnabled = abfsConfiguration.isDelegationTokenManagerEnabled();
 
@@ -137,6 +142,7 @@ public class AzureBlobFileSystem extends FileSystem {
     // Initialize ABFS authorizer
     //
     this.authorizer = abfsConfiguration.getAbfsAuthorizer();
+    LOG.debug("Initializing AzureBlobFileSystem for {} complete", uri);
   }
 
   @Override
@@ -633,6 +639,83 @@ public class AzureBlobFileSystem extends FileSystem {
   }
 
   /**
+   * Set the value of an attribute for a path.
+   *
+   * @param path The path on which to set the attribute
+   * @param name The attribute to set
+   * @param value The byte value of the attribute to set (encoded in latin-1)
+   * @param flag The mode in which to set the attribute
+   * @throws IOException If there was an issue setting the attribute on Azure
+   * @throws IllegalArgumentException If name is null or empty or if value is null
+   */
+  @Override
+  public void setXAttr(final Path path, final String name, final byte[] value, final EnumSet<XAttrSetFlag> flag)
+      throws IOException {
+    LOG.debug("AzureBlobFileSystem.setXAttr path: {}", path);
+
+    if (name == null || name.isEmpty() || value == null) {
+      throw new IllegalArgumentException("A valid name and value must be specified.");
+    }
+
+    Path qualifiedPath = makeQualified(path);
+    performAbfsAuthCheck(FsAction.READ_WRITE, qualifiedPath);
+
+    try {
+      Hashtable<String, String> properties = abfsStore.getPathStatus(path);
+      String xAttrName = ensureValidAttributeName(name);
+      boolean xAttrExists = properties.containsKey(xAttrName);
+      XAttrSetFlag.validate(name, xAttrExists, flag);
+
+      String xAttrValue = abfsStore.decodeAttribute(value);
+      properties.put(xAttrName, xAttrValue);
+      abfsStore.setPathProperties(path, properties);
+    } catch (AzureBlobFileSystemException ex) {
+      checkException(path, ex);
+    }
+  }
+
+  /**
+   * Get the value of an attribute for a path.
+   *
+   * @param path The path on which to get the attribute
+   * @param name The attribute to get
+   * @return The bytes of the attribute's value (encoded in latin-1)
+   *         or null if the attribute does not exist
+   * @throws IOException If there was an issue getting the attribute from Azure
+   * @throws IllegalArgumentException If name is null or empty
+   */
+  @Override
+  public byte[] getXAttr(final Path path, final String name)
+      throws IOException {
+    LOG.debug("AzureBlobFileSystem.getXAttr path: {}", path);
+
+    if (name == null || name.isEmpty()) {
+      throw new IllegalArgumentException("A valid name must be specified.");
+    }
+
+    Path qualifiedPath = makeQualified(path);
+    performAbfsAuthCheck(FsAction.READ, qualifiedPath);
+
+    byte[] value = null;
+    try {
+      Hashtable<String, String> properties = abfsStore.getPathStatus(path);
+      String xAttrName = ensureValidAttributeName(name);
+      if (properties.containsKey(xAttrName)) {
+        String xAttrValue = properties.get(xAttrName);
+        value = abfsStore.encodeAttribute(xAttrValue);
+      }
+    } catch (AzureBlobFileSystemException ex) {
+      checkException(path, ex);
+    }
+    return value;
+  }
+
+  private static String ensureValidAttributeName(String attribute) {
+    // to avoid HTTP 400 Bad Request, InvalidPropertyName
+    return attribute.replace('.', '_');
+  }
+
+  /**
    * Set permission of a path.
    *
    * @param path       The path
@@ -861,9 +944,14 @@ public class AzureBlobFileSystem extends FileSystem {
    * @throws IOException                   see specific implementation
    */
   @Override
-  public void access(final Path path, FsAction mode) throws IOException {
-    // TODO: make it no-op to unblock hive permission issue for now.
-    // Will add a long term fix similar to the implementation in AdlFileSystem.
+  public void access(final Path path, final FsAction mode) throws IOException {
+    LOG.debug("AzureBlobFileSystem.access path : {}, mode : {}", path, mode);
+    Path qualifiedPath = makeQualified(path);
+    try {
+      this.abfsStore.access(qualifiedPath, mode);
+    } catch (AzureBlobFileSystemException ex) {
+      checkCheckAccessException(path, ex);
+    }
   }
 
   private FileStatus tryGetFileStatus(final Path f) {
@@ -974,6 +1062,18 @@ public class AzureBlobFileSystem extends FileSystem {
           = new FileSystemOperationUnhandledException(exception);
       throw new IOException(fileSystemOperationUnhandledException);
     }
+  }
+
+  private void checkCheckAccessException(final Path path,
+      final AzureBlobFileSystemException exception) throws IOException {
+    if (exception instanceof AbfsRestOperationException) {
+      AbfsRestOperationException ere = (AbfsRestOperationException) exception;
+      if (ere.getStatusCode() == HttpURLConnection.HTTP_FORBIDDEN) {
+        throw (IOException) new AccessControlException(ere.getMessage())
+            .initCause(exception);
+      }
+    }
+    checkException(path, exception);
   }
 
   /**

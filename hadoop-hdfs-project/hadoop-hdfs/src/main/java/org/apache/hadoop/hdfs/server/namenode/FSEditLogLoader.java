@@ -801,7 +801,8 @@ public class FSEditLogLoader {
       INodesInPath iip = fsDir.getINodesInPath(snapshotRoot, DirOp.WRITE);
       String path = fsNamesys.getSnapshotManager().createSnapshot(
           fsDir.getFSNamesystem().getLeaseManager(),
-          iip, snapshotRoot, createSnapshotOp.snapshotName);
+          iip, snapshotRoot, createSnapshotOp.snapshotName,
+          createSnapshotOp.mtime);
       if (toAddRetryCache) {
         fsNamesys.addCacheEntryWithPayload(createSnapshotOp.rpcClientId,
             createSnapshotOp.rpcCallId, path);
@@ -819,7 +820,7 @@ public class FSEditLogLoader {
       fsNamesys.getSnapshotManager().deleteSnapshot(iip,
           deleteSnapshotOp.snapshotName,
           new INode.ReclaimContext(fsNamesys.dir.getBlockStoragePolicySuite(),
-              collectedBlocks, removedINodes, null));
+              collectedBlocks, removedINodes, null), deleteSnapshotOp.mtime);
       fsNamesys.getBlockManager().removeBlocksAndUpdateSafemodeTotal(
           collectedBlocks);
       collectedBlocks.clear();
@@ -840,7 +841,7 @@ public class FSEditLogLoader {
       INodesInPath iip = fsDir.getINodesInPath(snapshotRoot, DirOp.WRITE);
       fsNamesys.getSnapshotManager().renameSnapshot(iip,
           snapshotRoot, renameSnapshotOp.snapshotOldName,
-          renameSnapshotOp.snapshotNewName);
+          renameSnapshotOp.snapshotNewName, renameSnapshotOp.mtime);
       
       if (toAddRetryCache) {
         fsNamesys.addCacheEntry(renameSnapshotOp.rpcClientId,
