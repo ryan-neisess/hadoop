@@ -12,8 +12,7 @@
  * limitations under the License. See accompanying LICENSE file.
  */
 
-//This should be changed to package org.apache.hadoop.security.authentication.client;
-package main.java.org.apache.hadoop.security.authentication.client;
+package org.apache.hadoop.security.authentication.client;
 
 import com.google.common.annotations.VisibleForTesting;
 import java.lang.reflect.Constructor;
@@ -45,6 +44,16 @@ import java.security.PrivilegedExceptionAction;
 import java.util.HashMap;
 import java.util.Map;
 
+//Imports for certificate
+import java.security.PublicKey;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.interfaces.RSAPublicKey;
+import java.security.Principal;
+import javax.security.auth.callback.*;
+import javax.security.auth.spi.*;
+
 import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
 
 /**
@@ -72,20 +81,19 @@ public class SSHAuthenticator implements Authenticator {
         connConfigurator = configurator;
     }
 
-
     /**
-     * HTTP header used by the SPNEGO server endpoint during an authentication sequence.
+     * HTTP header used by the SSH server endpoint during an authentication sequence.
      */
     public static final String WWW_AUTHENTICATE =
         HttpConstants.WWW_AUTHENTICATE_HEADER;
 
     /**
-     * HTTP header used by the SPNEGO client endpoint during an authentication sequence.
+     * HTTP header used by the SSH client endpoint during an authentication sequence.
      */
     public static final String AUTHORIZATION = HttpConstants.AUTHORIZATION_HEADER;
 
     /**
-     * HTTP header prefix used by the SPNEGO client/server endpoints during an authentication sequence.
+     * HTTP header prefix used by the SSH client/server endpoints during an authentication sequence.
      */
     public static final String NEGOTIATE = HttpConstants.NEGOTIATE;
 
@@ -115,10 +123,12 @@ public class SSHAuthenticator implements Authenticator {
      */
     private PublicKey caPublicKey;
 
+    //Principal doesnt exist as X509... We'd have to make our own class. I found a page on that but I 
+    // Dont know if it is really needed so we'll skip that for now 
     /**
      * Principal
      */
-    private X509Principal x509Principal;
+    // private X509Principal x509Principal;
 
     /**
      * X509 certificate of user
@@ -135,4 +145,114 @@ public class SSHAuthenticator implements Authenticator {
      */
     private static final String defaultCertificateType = "X.509";
 
+    /**
+     * Initialize this <code>LoginModule</code>.
+     *
+     * <p>
+     *
+     * @param subject the <code>Subject</code> to be authenticated. <p>
+     *
+     * @param callbackHandler a <code>CallbackHandler</code> for communicating
+     *			with the end user (prompting for usernames and
+    *			passwords, for example). <p>
+    *
+    * @param sharedState shared <code>LoginModule</code> state. <p>
+    *
+    * @param options options specified in the login
+    *			<code>Configuration</code> for this particular
+    *			<code>LoginModule</code>.
+    */
+    public void initialize(Subject subject, CallbackHandler callbackHandler, Map sharedState, Map options) {
+        this.subject         = subject;
+        this.callbackHandler = callbackHandler;
+        this.sharedState     = sharedState;
+        this.options         = options;
+
+        // initialize any configured options 
+        //CHANGE THIS TO AUTH_HTTP_METHOD?????????????
+        debug = "true".equalsIgnoreCase((String)options.get("debug"));
+        
+        // FIXME Ultimately we might want to allow multiple CA authorities
+        caCertificateResource = (String)options.get("ca.certificate");
+        caCertificateType     = (String)options.get("ca.certificate.type");
+    }
+
+    /**
+     * Performs SSH authentication against the specified URL.
+     * <p>
+     * If a token is given it does a NOP and returns the given token.
+     * <p>
+     * If no token is given, it will perform the SSH authentication sequence using an
+     * HTTP <code>OPTIONS</code> request.
+     *
+     * @param url the URl to authenticate against.
+     * @param token the authentication token being used for the user.
+     *
+     * @throws IOException if an IO error occurred.
+     * @throws AuthenticationException if an authentication error occurred.
+     */
+    @Override
+    public void authenticate(URL url, AuthenticatedURL.Token token) throws IOException, AuthenticationException {
+        // String strUrl = url.toString();
+        // String paramSeparator = (strUrl.contains("?")) ? "&" : "?";
+        // strUrl += paramSeparator + USER_NAME_EQ + getUserName();
+        // url = new URL(strUrl);
+        // HttpURLConnection conn = token.openConnection(url, connConfigurator);
+        // conn.setRequestMethod("OPTIONS");
+        // conn.connect();
+        // AuthenticatedURL.extractToken(conn, token);
+        if (!token.isSet()) {
+            this.url = url;
+            try {
+              HttpURLConnection conn = token.openConnection(url, connConfigurator);
+              conn.setRequestMethod(AUTH_HTTP_METHOD);
+              conn.connect();
+      
+              boolean needFallback = false;
+              if (conn.getResponseCode() == HttpURLConnection.HTTP_OK) {
+                LOG.debug("JDK performed authentication on our behalf.");
+                // If the JDK already did the SPNEGO back-and-forth for
+                // us, just pull out the token.
+                AuthenticatedURL.extractToken(conn, token);
+                if (isTokenCert(token)) {
+                  return;
+                }
+                needFallback = true;
+              }
+              if (!needFallback && isNegotiate(conn)) {
+                LOG.debug("Performing our own SSH Authentication.");
+                doSSHAuth(token);
+              } else {
+                LOG.debug("Using fallback authenticator sequence.");
+                Authenticator auth = getFallBackAuthenticator();
+                // Make sure that the fall back authenticator have the same
+                // ConnectionConfigurator, since the method might be overridden.
+                // Otherwise the fall back authenticator might not have the
+                // information to make the connection (e.g., SSL certificates)
+                auth.setConnectionConfigurator(connConfigurator);
+                auth.authenticate(url, token);
+              }
+            } catch (IOException ex){
+              throw wrapExceptionWithMessage(ex,
+                  "Error while authenticating with endpoint: " + url);
+            } catch (AuthenticationException ex){
+              throw wrapExceptionWithMessage(ex,
+                  "Error while authenticating with endpoint: " + url);
+            }
+        }
+    }
+
+    /*
+   * Check if the passed token is of type "kerberos" or "kerberos-dt"
+   */
+    private boolean isTokenCert(AuthenticatedURL.Token token) throws AuthenticationException {
+        if (token.isSet()) {
+            AuthToken aToken = AuthToken.parse(token.toString());          
+            if (aToken.getType().equals("ca.certificate") ||
+                aToken.getType().equals("kerberos-dt")) {              
+                return true;
+            }
+        }
+        return false;
+    }
 }
