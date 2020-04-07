@@ -65,10 +65,11 @@ import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
  */
 public class SSHAuthenticator implements Authenticator {
 
-    private static Logger LOG = LoggerFactory.getLogger(
-      SSHAuthenticator.class);
+    private static Logger LOG = LoggerFactory.getLogger(SSHAuthenticator.class);
 
-      private ConnectionConfigurator connConfigurator;
+    private URL url;
+    private Base64 base64;
+    private ConnectionConfigurator connConfigurator;
 
     /**
      * Sets a {@link ConnectionConfigurator} instance to use for
@@ -99,36 +100,11 @@ public class SSHAuthenticator implements Authenticator {
 
     private static final String AUTH_HTTP_METHOD = "OPTIONS";
 
-    ////////////////////////////////////////
-    // Variables
-    ////////////////////////////////////////
-    // initial state
-    private Subject subject;
-    private CallbackHandler callbackHandler;
-    private Map sharedState;
-    private Map options;
-
-    // configurable option
-    private boolean debug = false;
-    private String caCertificateResource;
-    private String caCertificateType = defaultCertificateType;
-
-    // the authentication status
-    private boolean succeeded       = false;
-    private boolean commitSucceeded = false;
-
-    // other
     /**
      * CA certificate
      */
-    private PublicKey caPublicKey;
-
-    //Principal doesnt exist as X509... We'd have to make our own class. I found a page on that but I 
-    // Dont know if it is really needed so we'll skip that for now 
-    /**
-     * Principal
-     */
-    // private X509Principal x509Principal;
+    // private PublicKey caPublicKey;
+    private static final PublicKey caPublicKey = new CertificateUtil().parseRSAPublicKey(new Base64(0));
 
     /**
      * X509 certificate of user
@@ -145,36 +121,81 @@ public class SSHAuthenticator implements Authenticator {
      */
     private static final String defaultCertificateType = "X.509";
 
-    /**
-     * Initialize this <code>LoginModule</code>.
-     *
-     * <p>
-     *
-     * @param subject the <code>Subject</code> to be authenticated. <p>
-     *
-     * @param callbackHandler a <code>CallbackHandler</code> for communicating
-     *			with the end user (prompting for usernames and
-    *			passwords, for example). <p>
-    *
-    * @param sharedState shared <code>LoginModule</code> state. <p>
-    *
-    * @param options options specified in the login
-    *			<code>Configuration</code> for this particular
-    *			<code>LoginModule</code>.
+    /*
+    * Defines the SSH configuration that will be used to obtain the X.509 principal from the
+    * cache.
     */
-    public void initialize(Subject subject, CallbackHandler callbackHandler, Map sharedState, Map options) {
-        this.subject         = subject;
-        this.callbackHandler = callbackHandler;
-        this.sharedState     = sharedState;
-        this.options         = options;
-
-        // initialize any configured options 
-        //CHANGE THIS TO AUTH_HTTP_METHOD?????????????
-        debug = "true".equalsIgnoreCase((String)options.get("debug"));
-        
-        // FIXME Ultimately we might want to allow multiple CA authorities
-        caCertificateResource = (String)options.get("ca.certificate");
-        caCertificateType     = (String)options.get("ca.certificate.type");
+    private static class SSHConfiguration extends Configuration {
+        //Needs to be initialized. Probably put the login with callback handler here
+        private static final String OS_LOGIN_MODULE_NAME;
+        private static final boolean windows = System.getProperty("os.name").startsWith("Windows");
+        private static final boolean is64Bit = System.getProperty("os.arch").contains("64");
+        private static final boolean aix = System.getProperty("os.name").equals("AIX");
+    
+        /* Return the OS login module class name */
+        private static String getOSLoginModuleName() {
+          if (IBM_JAVA) {
+            if (windows) {
+              return is64Bit ? "com.ibm.security.auth.module.Win64LoginModule"
+                  : "com.ibm.security.auth.module.NTLoginModule";
+            } else if (aix) {
+              return is64Bit ? "com.ibm.security.auth.module.AIX64LoginModule"
+                  : "com.ibm.security.auth.module.AIXLoginModule";
+            } else {
+              return "com.ibm.security.auth.module.LinuxLoginModule";
+            }
+          } else {
+            return windows ? "com.sun.security.auth.module.NTLoginModule"
+                : "com.sun.security.auth.module.UnixLoginModule";
+          }
+        }
+    
+        static {
+          OS_LOGIN_MODULE_NAME = getOSLoginModuleName();
+        }
+    
+        private static final AppConfigurationEntry OS_SPECIFIC_LOGIN =
+          new AppConfigurationEntry(OS_LOGIN_MODULE_NAME,
+                                    AppConfigurationEntry.LoginModuleControlFlag.REQUIRED,
+                                    new HashMap<String, String>());
+    
+        private static final Map<String, String> USER_CERTIFICATE_OPTIONS = new HashMap<String, String>();
+        // private static final PublicKey caPublicKey = new CertificateUtil();
+        static {
+            //SHOULD GET SSH CERTIFICATE CACHE
+            String ticketCache = System.getenv("SSH_AUTH_SOCK");
+            if (IBM_JAVA) {
+                USER_CERTIFICATE_OPTIONS.put("useDefaultCcache", "true");
+            } else {
+                USER_CERTIFICATE_OPTIONS.put("doNotPrompt", "true");
+                USER_CERTIFICATE_OPTIONS.put("useTicketCache", "true");
+            }
+            if (ticketCache != null) {
+                if (IBM_JAVA) {
+                // The first value searched when "useDefaultCcache" is used.
+                System.setProperty("SSH_AUTH_SOCK", ticketCache);
+                } else {
+                    USER_CERTIFICATE_OPTIONS.put("ticketCache", ticketCache);
+                }
+            }
+            USER_CERTIFICATE_OPTIONS.put("renewTGT", "true");
+            //Add public key of certificate
+            // USER_CERTIFICATE_OPTIONS.put("ca.public.key", CertificateUtil.parseRSAPublicKey())
+            USER_CERTIFICATE_OPTIONS.put("ca.certificate.type", "X.509");
+        }
+    
+        private static final AppConfigurationEntry USER_CERTIFICATE_LOGIN =
+          new AppConfigurationEntry(CertificateUtil.getPublicKey(),
+                                    AppConfigurationEntry.LoginModuleControlFlag.OPTIONAL,
+                                    USER_CERTIFICATE_OPTIONS);
+    
+        private static final AppConfigurationEntry[] USER_CERTIFICATE_CONF =
+          new AppConfigurationEntry[]{OS_SPECIFIC_LOGIN, USER_CERTIFICATE_LOGIN};
+    
+        @Override
+        public AppConfigurationEntry[] getAppConfigurationEntry(String appName) {
+          return USER_CERTIFICATE_CONF;
+        }
     }
 
     /**
@@ -193,16 +214,9 @@ public class SSHAuthenticator implements Authenticator {
      */
     @Override
     public void authenticate(URL url, AuthenticatedURL.Token token) throws IOException, AuthenticationException {
-        // String strUrl = url.toString();
-        // String paramSeparator = (strUrl.contains("?")) ? "&" : "?";
-        // strUrl += paramSeparator + USER_NAME_EQ + getUserName();
-        // url = new URL(strUrl);
-        // HttpURLConnection conn = token.openConnection(url, connConfigurator);
-        // conn.setRequestMethod("OPTIONS");
-        // conn.connect();
-        // AuthenticatedURL.extractToken(conn, token);
         if (!token.isSet()) {
             this.url = url;
+            base64 = new Base64(0);
             try {
               HttpURLConnection conn = token.openConnection(url, connConfigurator);
               conn.setRequestMethod(AUTH_HTTP_METHOD);
@@ -221,7 +235,7 @@ public class SSHAuthenticator implements Authenticator {
               }
               if (!needFallback && isNegotiate(conn)) {
                 LOG.debug("Performing our own SSH Authentication.");
-                doSSHAuth(token);
+                // doSSHAuth(token);
               } else {
                 LOG.debug("Using fallback authenticator sequence.");
                 Authenticator auth = getFallBackAuthenticator();
@@ -241,9 +255,37 @@ public class SSHAuthenticator implements Authenticator {
             }
         }
     }
+    @VisibleForTesting
+    static <T extends Exception> T wrapExceptionWithMessage(T exception, String msg) {
+        Class<? extends Throwable> exceptionClass = exception.getClass();
+        try {
+            Constructor<? extends Throwable> ctor = exceptionClass.getConstructor(String.class);
+            Throwable t = ctor.newInstance(msg);
+            return (T) (t.initCause(exception));
+        } catch (Throwable e) {
+            LOG.debug("Unable to wrap exception of type {}, it has "
+                + "no (String) constructor.", exceptionClass, e);
+            return exception;
+        }
+    }
+
+    /**
+   * If the specified URL does not support SSH authentication, a fallback {@link Authenticator} will be used.
+   * <p>
+   * This implementation returns a {@link PseudoAuthenticator}.
+   *
+   * @return the fallback {@link Authenticator}.
+   */
+    protected Authenticator getFallBackAuthenticator() {
+        Authenticator auth = new PseudoAuthenticator();
+        if (connConfigurator != null) {
+            auth.setConnectionConfigurator(connConfigurator);
+        }
+        return auth;
+    }
 
     /*
-   * Check if the passed token is of type "kerberos" or "kerberos-dt"
+   * Check if the passed token is of type "cert" or "kerberos-dt"
    */
     private boolean isTokenCert(AuthenticatedURL.Token token) throws AuthenticationException {
         if (token.isSet()) {
@@ -254,5 +296,17 @@ public class SSHAuthenticator implements Authenticator {
             }
         }
         return false;
+    }
+
+    /*
+    * Indicates if the response is starting a SSH negotiation.
+    */
+    private boolean isNegotiate(HttpURLConnection conn) throws IOException {
+        boolean negotiate = false;
+        if (conn.getResponseCode() == HttpURLConnection.HTTP_UNAUTHORIZED) {
+            String authHeader = conn.getHeaderField(WWW_AUTHENTICATE);
+            negotiate = authHeader != null && authHeader.trim().startsWith(NEGOTIATE);
+        }
+        return negotiate;
     }
 }
