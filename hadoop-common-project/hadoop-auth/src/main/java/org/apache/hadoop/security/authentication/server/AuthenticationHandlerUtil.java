@@ -51,6 +51,8 @@ public final class AuthenticationHandlerUtil {
 
     if (handlerName.equals(PseudoAuthenticationHandler.TYPE)) {
       authHandlerClassName = PseudoAuthenticationHandler.class.getName();
+    } else if (handlerName.equals(SSHAuthenticationHandler.TYPE)) {
+      authHandlerClassName = SSHAuthenticationHandler.class.getName();
     } else if (handlerName.equals(KerberosAuthenticationHandler.TYPE)) {
       authHandlerClassName = KerberosAuthenticationHandler.class.getName();
     } else if (handlerName.equals(LdapAuthenticationHandler.TYPE)) {

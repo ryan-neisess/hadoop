@@ -162,7 +162,8 @@ public class AuthenticationFilter implements Filter {
     String authHandlerClassName;
     if (authHandlerName == null) {
       throw new ServletException("Authentication type must be specified: " +
-          PseudoAuthenticationHandler.TYPE + "|" + 
+          PseudoAuthenticationHandler.TYPE + "|" +
+          SSHAuthenticationHandler.TYPE + "|" +
           KerberosAuthenticationHandler.TYPE + "|<class>");
     }
     authHandlerClassName =
