@@ -49,6 +49,7 @@ import java.security.PublicKey;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.security.cert.Certificate;
 import java.security.interfaces.RSAPublicKey;
 import java.security.Principal;
 import javax.security.auth.callback.*;
@@ -56,7 +57,12 @@ import javax.security.auth.spi.*;
 
 import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
 
-/**
+// JAAS PAM WRAPPER! VERY IMPORTANT 
+// READ "http://jaas-pam.sourceforge.net/jaas.html"
+// import for the JaasPam login module -  NEEDS TO BE DOWNLOADED AND ADDED TO THE PATH
+// import ch.odi.jaaspam;
+
+ /**
  * The {@link SSHAuthenticator} implements the SSH certificate authentication sequence.
  * <p>
  * It uses the default certificate set through CertificateUtil.
@@ -65,22 +71,17 @@ import static org.apache.hadoop.util.PlatformName.IBM_JAVA;
  */
 public class SSHAuthenticator implements Authenticator {
 
+    // static {
+    //     try{
+    //         System.load("/usr/lib/pam/pam-ussh.so");
+    //     } catch (UnsatisfiedLinkError e) {
+    //         System.err.println("Native code library failed to load.\n" + e);
+    //         System.exit(1);
+    //     }
+    // }
+    
+
     private static Logger LOG = LoggerFactory.getLogger(SSHAuthenticator.class);
-
-    private URL url;
-    private Base64 base64;
-    private ConnectionConfigurator connConfigurator;
-
-    /**
-     * Sets a {@link ConnectionConfigurator} instance to use for
-     * configuring connections.
-     *
-     * @param configurator the {@link ConnectionConfigurator} instance.
-     */
-    @Override
-    public void setConnectionConfigurator(ConnectionConfigurator configurator) {
-        connConfigurator = configurator;
-    }
 
     /**
      * HTTP header used by the SSH server endpoint during an authentication sequence.
@@ -100,102 +101,120 @@ public class SSHAuthenticator implements Authenticator {
 
     private static final String AUTH_HTTP_METHOD = "OPTIONS";
 
-    /**
-     * CA certificate
-     */
-    // private PublicKey caPublicKey;
-    private static final PublicKey caPublicKey = new CertificateUtil().parseRSAPublicKey(new Base64(0));
-
-    /**
-     * X509 certificate of user
-     */
-    private X509Certificate certificate;
-
-    /**
-     * Identifier for CA certificate
-     */
-    private static final String CA_PUBLIC_KEY = "ca.public.key";
-
-    /**
-     * Identifier for CA certificate
-     */
-    private static final String defaultCertificateType = "X.509";
-
-    /*
-    * Defines the SSH configuration that will be used to obtain the X.509 principal from the
-    * cache.
+     /*
+    * Defines the SSH Certificate configuration that will be used to obtain the Certificate principal
+    * from the Certificate Cache.
+    *
+    * Lists the LoginModules that will be called by the LoginContext. This is where we want to use pam-ussh??
     */
     private static class SSHConfiguration extends Configuration {
-        //Needs to be initialized. Probably put the login with callback handler here
+        // NEED TO BUILD OUR OWN LOGIN MODULE AND GIVE IT TO OS_LOGIN_MODULE_NAME;
+        // NEEDS TO USE THE LINUX-PAM MODULE WITH SSH, HOW? IDK
+
+        // NEED TO SET SSH_AUTH_SOCK HERE
         private static final String OS_LOGIN_MODULE_NAME;
         private static final boolean windows = System.getProperty("os.name").startsWith("Windows");
         private static final boolean is64Bit = System.getProperty("os.arch").contains("64");
         private static final boolean aix = System.getProperty("os.name").equals("AIX");
-    
+
+        // THESE ARE THE REQUIRED LOGIN MODULES THAT HAVE TO PASS ALWAYS
         /* Return the OS login module class name */
         private static String getOSLoginModuleName() {
-          if (IBM_JAVA) {
-            if (windows) {
-              return is64Bit ? "com.ibm.security.auth.module.Win64LoginModule"
-                  : "com.ibm.security.auth.module.NTLoginModule";
-            } else if (aix) {
-              return is64Bit ? "com.ibm.security.auth.module.AIX64LoginModule"
-                  : "com.ibm.security.auth.module.AIXLoginModule";
+            if (IBM_JAVA) {
+                if (windows) {
+                    return is64Bit ? "com.ibm.security.auth.module.Win64LoginModule"
+                        : "com.ibm.security.auth.module.NTLoginModule";
+                } else if (aix) {
+                    return is64Bit ? "com.ibm.security.auth.module.AIX64LoginModule"
+                        : "com.ibm.security.auth.module.AIXLoginModule";
+                } else {
+                    return "com.ibm.security.auth.module.LinuxLoginModule";
+                }
             } else {
-              return "com.ibm.security.auth.module.LinuxLoginModule";
+                return windows ? "com.sun.security.auth.module.NTLoginModule"
+                    : "com.sun.security.auth.module.UnixLoginModule";
             }
-          } else {
-            return windows ? "com.sun.security.auth.module.NTLoginModule"
-                : "com.sun.security.auth.module.UnixLoginModule";
-          }
         }
-    
+
         static {
-          OS_LOGIN_MODULE_NAME = getOSLoginModuleName();
+            OS_LOGIN_MODULE_NAME = getOSLoginModuleName();
         }
-    
+
+        // Give it to the configuration in the format "LoginModule, requirements, options"
         private static final AppConfigurationEntry OS_SPECIFIC_LOGIN =
-          new AppConfigurationEntry(OS_LOGIN_MODULE_NAME,
-                                    AppConfigurationEntry.LoginModuleControlFlag.REQUIRED,
-                                    new HashMap<String, String>());
-    
-        private static final Map<String, String> USER_CERTIFICATE_OPTIONS = new HashMap<String, String>();
-        // private static final PublicKey caPublicKey = new CertificateUtil();
+            new AppConfigurationEntry(OS_LOGIN_MODULE_NAME,
+                                AppConfigurationEntry.LoginModuleControlFlag.REQUIRED,
+                                new HashMap<String, String>());
+
+        private static final Map<String, String> USER_SSH_OPTIONS = new HashMap<String, String>();
+
+        // NOW WE BUILD OUR OWN CONFIGURATION FOR SSH THAT IS OPTIONAL IN PASSING
         static {
-            //SHOULD GET SSH CERTIFICATE CACHE
+            //This could be /etc/ssh/trusted_user_ca but I think its SSH_AUTH_SOCK
             String ticketCache = System.getenv("SSH_AUTH_SOCK");
             if (IBM_JAVA) {
-                USER_CERTIFICATE_OPTIONS.put("useDefaultCcache", "true");
+                USER_SSH_OPTIONS.put("useDefaultCcache", "true");
             } else {
-                USER_CERTIFICATE_OPTIONS.put("doNotPrompt", "true");
-                USER_CERTIFICATE_OPTIONS.put("useTicketCache", "true");
+                USER_SSH_OPTIONS.put("doNotPrompt", "true");
+                USER_SSH_OPTIONS.put("useTicketCache", "true");
             }
             if (ticketCache != null) {
                 if (IBM_JAVA) {
                 // The first value searched when "useDefaultCcache" is used.
                 System.setProperty("SSH_AUTH_SOCK", ticketCache);
                 } else {
-                    USER_CERTIFICATE_OPTIONS.put("ticketCache", ticketCache);
+                USER_SSH_OPTIONS.put("ticketCache", ticketCache);
                 }
             }
-            USER_CERTIFICATE_OPTIONS.put("renewTGT", "true");
-            //Add public key of certificate
-            // USER_CERTIFICATE_OPTIONS.put("ca.public.key", CertificateUtil.parseRSAPublicKey())
-            USER_CERTIFICATE_OPTIONS.put("ca.certificate.type", "X.509");
+            // This is just a ticket renewal thing, so could probably stay
+            USER_SSH_OPTIONS.put("renewTGT", "true");
+
+            // THIS IS FOR THE JAAS PAM MODULE. WE NEED TO CREATE A CONFIG FILE CALLED SSH-LOGIN THAT CONTAINS 
+            // PAM-USSH.SO IN THE FORMAT "AUTH OPTIONAL PAM-USSH.SO OTHER OPTIONS ABOUT THE USING PAM-USSH.SO"
+            USER_SSH_OPTIONS.put("service", "ssh-login");
+
+            // ACCORDING TO UBER-PAM THE SSH-LOGIN CONFIG FILE SHOULD HAVE THIS:
+            // "auth [success=1 default=ignore] /lib/security/pam_ussh.so ca_file=/etc/ssh/user_ca authorized_principals_file=/etc/ssh/root_authorized_principals"
+
+            // and should look like
+            // ssh-login {
+            //     auth [success=1 default=ignore] /lib/security/pam_ussh.so ca_file=/etc/ssh/user_ca authorized_principals_file=/etc/ssh/root_authorized_principals
+            // }
         }
-    
-        private static final AppConfigurationEntry USER_CERTIFICATE_LOGIN =
-          new AppConfigurationEntry(CertificateUtil.getPublicKey(),
-                                    AppConfigurationEntry.LoginModuleControlFlag.OPTIONAL,
-                                    USER_CERTIFICATE_OPTIONS);
-    
-        private static final AppConfigurationEntry[] USER_CERTIFICATE_CONF =
-          new AppConfigurationEntry[]{OS_SPECIFIC_LOGIN, USER_CERTIFICATE_LOGIN};
-    
+
+        // IT MIGHT BE "/usr/lib/pam/pam-ussh.so"
+        // /lib/security/pam-ussh.so
+        // SHOULD I REPLACE THE SLASHES WITH .?
+        // Now we set out own login here
+        private static final AppConfigurationEntry USER_SSH_LOGIN =
+            new AppConfigurationEntry("ch.odi.jaaspam.PamLoginModule",
+                                AppConfigurationEntry.LoginModuleControlFlag.OPTIONAL,
+                                USER_SSH_OPTIONS);
+
+        private static final AppConfigurationEntry[] USER_SSH_CONF =
+            new AppConfigurationEntry[]{OS_SPECIFIC_LOGIN, USER_SSH_LOGIN};
+
         @Override
         public AppConfigurationEntry[] getAppConfigurationEntry(String appName) {
-          return USER_CERTIFICATE_CONF;
+            return USER_SSH_CONF;
         }
+    }
+
+
+
+    private URL url;
+    private Base64 base64;
+    private ConnectionConfigurator connConfigurator;
+
+    /**
+     * Sets a {@link ConnectionConfigurator} instance to use for
+     * configuring connections.
+     *
+     * @param configurator the {@link ConnectionConfigurator} instance.
+     */
+    @Override
+    public void setConnectionConfigurator(ConnectionConfigurator configurator) {
+        connConfigurator = configurator;
     }
 
     /**
@@ -225,9 +244,9 @@ public class SSHAuthenticator implements Authenticator {
               boolean needFallback = false;
               if (conn.getResponseCode() == HttpURLConnection.HTTP_OK) {
                 LOG.debug("JDK performed authentication on our behalf.");
-                // If the JDK already did the SPNEGO back-and-forth for
-                // us, just pull out the token.
+                // If the JDK already did the SSH authentication for us pull the token
                 AuthenticatedURL.extractToken(conn, token);
+                //Check if the token is SSH or x509??? and return??
                 if (isTokenCert(token)) {
                   return;
                 }
@@ -235,7 +254,7 @@ public class SSHAuthenticator implements Authenticator {
               }
               if (!needFallback && isNegotiate(conn)) {
                 LOG.debug("Performing our own SSH Authentication.");
-                // doSSHAuth(token);
+                doSSHAuth(token);
               } else {
                 LOG.debug("Using fallback authenticator sequence.");
                 Authenticator auth = getFallBackAuthenticator();
@@ -270,12 +289,12 @@ public class SSHAuthenticator implements Authenticator {
     }
 
     /**
-   * If the specified URL does not support SSH authentication, a fallback {@link Authenticator} will be used.
-   * <p>
-   * This implementation returns a {@link PseudoAuthenticator}.
-   *
-   * @return the fallback {@link Authenticator}.
-   */
+     * If the specified URL does not support SSH authentication, a fallback {@link Authenticator} will be used.
+     * <p>
+     * This implementation returns a {@link PseudoAuthenticator}.
+     *
+     * @return the fallback {@link Authenticator}.
+     */
     protected Authenticator getFallBackAuthenticator() {
         Authenticator auth = new PseudoAuthenticator();
         if (connConfigurator != null) {
@@ -283,15 +302,15 @@ public class SSHAuthenticator implements Authenticator {
         }
         return auth;
     }
-
+    
     /*
-   * Check if the passed token is of type "cert" or "kerberos-dt"
-   */
+    * Check if the passed token is of type "X.509"
+    * I am not sure what other certificate it would be, so right now it should only be X.509
+    */
     private boolean isTokenCert(AuthenticatedURL.Token token) throws AuthenticationException {
         if (token.isSet()) {
             AuthToken aToken = AuthToken.parse(token.toString());          
-            if (aToken.getType().equals("ca.certificate") ||
-                aToken.getType().equals("kerberos-dt")) {              
+            if (aToken.getType().equals("X.509")) {              
                 return true;
             }
         }
@@ -299,7 +318,7 @@ public class SSHAuthenticator implements Authenticator {
     }
 
     /*
-    * Indicates if the response is starting a SSH negotiation.
+    * Indicates if the response is starting an SSH negotiation.
     */
     private boolean isNegotiate(HttpURLConnection conn) throws IOException {
         boolean negotiate = false;
@@ -308,5 +327,58 @@ public class SSHAuthenticator implements Authenticator {
             negotiate = authHeader != null && authHeader.trim().startsWith(NEGOTIATE);
         }
         return negotiate;
+    }
+
+    /**
+    * Implements the SSH authentication sequence interaction using the current default principal
+    * in the Kerberos cache (normally set via kinit).
+    *
+    * @param token the authentication token being used for the user.
+    *
+    * @throws IOException if an IO error occurred.
+    * @throws AuthenticationException if an authentication error occurred.
+    */
+    private void doSSHAuth(final AuthenticatedURL.Token token) throws IOException, AuthenticationException {
+        try {
+            AccessControlContext context = AccessController.getContext();
+            Subject subject = Subject.getSubject(context);
+
+            //Check if subject was received, and if it actually has X.509 certs or certs at all
+            // SHOULD IT BE GETPRIVATECREDENTIALS??? OR GETPUBLICCREDENTIALS???
+            // SHOULD IT BE X.509CERTIFICATE.CLASS OR JUST CERTIFICATE.CLASS???
+            if (subject == null || subject.getPublicCredentials(Certificate.class).isEmpty()) {
+                LOG.debug("No subject in context, logging in.");
+                subject = new Subject();
+                ////////////////////////////////// FIX THIS HERE ///////////////////////////////////////
+                // This is where we need an SSHConfiguration() for NEW SSHCONFIGURATION()
+                // The SSHConfiguration() SPECIFIES which LoginModule to use to login. We most likely
+                // have to build a certificate based login module
+                // We also would probably want to give it a CallBackHandler. The reason is because
+                // kerberos just sets up stuff to ask for information later in the doAs command, but
+                // we want to handle everything in our login module!!!!
+                // must pass in the pam module that we want to use in name to the sshconfiguration
+                // Where null is, we might need to make our callback handler???
+                LoginContext login = new LoginContext("", subject, null, new SSHConfiguration());
+                // LoginContext login = new LoginContext("pam-ussh", subject, null);
+                login.login();
+            }
+            // At this point, the subject should be logged in
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Using subject: " + subject);
+            }
+            // KERBEROS ONLY DOES THIS BECAUSE THEY STILL HAVE TO AUTHENTICATE STUFF
+            // Here, we are overriding the PrivilegedExceptionAction's run method, providing it the subject
+            // What I think we want to do is to compare the things to authenticate the subject
+            // Basically, we are verifying now! VERIFY WITH LOADED CERTS??? OR COMMIT???
+            // DO WE EVEN NEED THE DO AS PART SINCE ITS ALREADY LOADED IN?????
+            // WE DO NEED THIS!! IF YOU LOOK UP THE ORACLE DOCS FOR LOGIN SEQUENCES IT EXPLAINS IT?????
+            // Subject.doAs(subject, new PrivilegedExceptionAction<Void>() {
+            //     @Override
+            //     public Void run() throws Exception {
+            //     }
+            // });
+        } catch (LoginException ex) {
+            throw new AuthenticationException(ex);
+        }
     }
 }
