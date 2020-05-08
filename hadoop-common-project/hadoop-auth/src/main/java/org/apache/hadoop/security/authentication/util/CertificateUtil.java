@@ -17,7 +17,12 @@
  */
 package org.apache.hadoop.security.authentication.util;
 
+import org.apache.kerby.kerberos.kerb.keytab.Keytab;
+import org.apache.kerby.kerberos.kerb.type.base.PrincipalName;
+
 import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.charset.StandardCharsets;
 import java.security.PublicKey;
@@ -25,6 +30,9 @@ import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.RSAPublicKey;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 import javax.servlet.ServletException;
 
@@ -62,4 +70,25 @@ public class CertificateUtil {
     }
     return (RSAPublicKey) key;
   }
+
+  /**
+   * Get all the unique principals present in the keytabfile.
+   *
+   * @param sshFileName
+   *          Name of the ssh file to be read.
+   * @return list of unique principals in the keytab.
+   * @throws IOException
+   *          If keytab entries cannot be read from the file.
+   */
+  public static final String[] getPrincipalNames(String sshFileName) throws IOException {
+    Keytab keytab = Keytab.loadKeytab(new File(sshFileName));
+    Set<String> principals = new HashSet<String>();
+    List<PrincipalName> entries = keytab.getPrincipals();
+    for (PrincipalName entry : entries) {
+      principals.add(entry.getName().replace("\\", "/"));
+    }
+    return principals.toArray(new String[0]);
+  }
 }
+
+
