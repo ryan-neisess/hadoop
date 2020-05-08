@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -24,6 +24,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Properties;
 
@@ -39,15 +40,18 @@ public class SSHAuthenticationHandler implements AuthenticationHandler {
   /**
    * Constant that identifies the authentication mechanism.
    */
-  public static final String TYPE = "ssh";
+  public static final String TYPE = "SSH";
 
   /**
    * Constant for the configuration property that indicates if anonymous users are allowed.
    */
-  private static final Charset UTF8_CHARSET = Charset.forName("UTF-8");
+  public static final String ANONYMOUS_ALLOWED = TYPE + ".anonymous.allowed"; //TODO:Change to anonymous not allowed?
+
+  private static final Charset UTF8_CHARSET = StandardCharsets.UTF_8;
 
   private static final String SSH_AUTH = "SSHAuth";
 
+  private boolean acceptAnonymous;
   private String type;
 
   /**
@@ -131,8 +135,24 @@ public class SSHAuthenticationHandler implements AuthenticationHandler {
     return true;
   }
 
+  private String getUserName(HttpServletRequest request) {
+    String queryString = request.getQueryString();
+    if(queryString == null || queryString.length() == 0) {
+      return null;
+    }
+    List<NameValuePair> list = URLEncodedUtils.parse(queryString, UTF8_CHARSET);
+    if (list != null) {
+      for (NameValuePair nv : list) {
+        if (PseudoAuthenticator.USER_NAME.equals(nv.getName())) {
+          return nv.getValue();
+        }
+      }
+    }
+    return null;
+  }
+
   /**
-   * Needs Update!
+   * TODO:so this authenticates the http client request?
    *
    * Authenticates an HTTP client request.
    * <p>
@@ -164,7 +184,7 @@ public class SSHAuthenticationHandler implements AuthenticationHandler {
         token = AuthenticationToken.ANONYMOUS;
       } else {
         response.setStatus(HttpServletResponse.SC_FORBIDDEN);
-        response.setHeader(WWW_AUTHENTICATE, PSEUDO_AUTH);
+        response.setHeader(WWW_AUTHENTICATE, SSH_AUTH); //NOTE:Changed pseudo auth to SSH_AUTH
         token = null;
       }
     } else {
